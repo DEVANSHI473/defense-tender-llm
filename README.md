@@ -1,19 +1,4 @@
-🤖 Defense Tender LLM Analyzer
-A sophisticated Large Language Model (LLM) system for analyzing defense tender documents using transformer-based neural networks.
-🧠 LLM Architecture
-Multi-Model Transformer System (570M+ Parameters)
 
-🔍 Question Answering: DistilBERT (66M parameters) - BERT-based transformer encoder
-🎯 Semantic Search: MiniLM (22M parameters) - Sentence transformer for embeddings
-📝 Text Generation: DistilGPT2 (82M parameters) - GPT-based transformer decoder
-🏷️ Classification: BART-Large (400M parameters) - Encoder-decoder transformer
-
-Key LLM Features
-✅ Transformer Architecture - Multi-head attention mechanisms
-✅ Neural Networks - Deep learning models throughout
-✅ Semantic Understanding - Context-aware document analysis
-✅ Pre-trained Models - Trained on billions of tokens
-✅ Fine-tuning Capable - Domain-specific adaptation
 🚀 Quick Start
 Prerequisites
 
@@ -53,7 +38,6 @@ result = qa_pipeline(
     question="What is the deadline?",
     context=document_context
 )
-# Returns: {'answer': 'March 15, 2024', 'confidence': 0.95}
 3. Neural Text Classification
 python# Zero-shot classification using BART
 labels = ["RFP", "Technical Specs", "Financial Terms"]
