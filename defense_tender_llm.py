@@ -1,9 +1,21 @@
+import os
+
+# Fix for Hugging Face Spaces: set Streamlit config to /tmp
+os.makedirs("/tmp/.streamlit", exist_ok=True)
+
+with open("/tmp/.streamlit/config.toml", "w") as f:
+    f.write("""
+[general]
+email = ""
+""")
+
+os.environ["STREAMLIT_CONFIG_DIR"] = "/tmp/.streamlit"
+
 import streamlit as st
 import torch
 from transformers import (
     AutoTokenizer, 
     AutoModelForQuestionAnswering,
-    AutoModel,
     pipeline
 )
 from sentence_transformers import SentenceTransformer
@@ -12,7 +24,6 @@ import faiss
 import PyPDF2
 import docx
 import tempfile
-import zipfile
 import os
 import re
 import time
@@ -21,112 +32,106 @@ from typing import List, Dict, Any
 import warnings
 warnings.filterwarnings("ignore")
 
+# Set page config
+st.set_page_config(
+    page_title="Defense Tender LLM Analyzer",
+    page_icon="🤖",
+    layout="wide"
+)
+
 class DefenseTenderLLM:
     def __init__(self):
-        """Initialize the Defense Tender LLM System"""
-        st.info("🤖 Initializing Large Language Models...")
+        """Initialize the Defense Tender LLM System for Hugging Face Spaces"""
         self.documents = []
         self.embeddings = None
         self.faiss_index = None
-        self.setup_llm_models()
+        self.models_loaded = False
         
-    def setup_llm_models(self):
-        """Setup transformer-based language models"""
+    @st.cache_resource
+    def load_models(_self):
+        """Load models with Hugging Face optimization"""
         try:
-            with st.spinner("🧠 Loading transformer models... (This may take 2-3 minutes on first run)"):
-                # 1. Question Answering LLM (BERT-based)
-                self.qa_model_name = "distilbert-base-cased-distilled-squad"
-                self.qa_tokenizer = AutoTokenizer.from_pretrained(self.qa_model_name)
-                self.qa_model = AutoModelForQuestionAnswering.from_pretrained(self.qa_model_name)
+            with st.spinner("🤖 Loading AI models... (First time may take 2-3 minutes)"):
+                models = {}
                 
-                # Create QA pipeline
-                self.qa_pipeline = pipeline(
+                progress = st.progress(0)
+                status = st.empty()
+                
+                # 1. Question Answering Model
+                status.text("Loading Question Answering model...")
+                qa_model_name = "distilbert-base-cased-distilled-squad"
+                models['qa_tokenizer'] = AutoTokenizer.from_pretrained(qa_model_name)
+                models['qa_model'] = AutoModelForQuestionAnswering.from_pretrained(qa_model_name)
+                models['qa_pipeline'] = pipeline(
                     "question-answering",
-                    model=self.qa_model,
-                    tokenizer=self.qa_tokenizer,
-                    return_tensors=True
+                    model=models['qa_model'],
+                    tokenizer=models['qa_tokenizer']
                 )
+                progress.progress(25)
                 
-                # 2. Semantic Search LLM (Sentence Transformers)
-                self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                # 2. Sentence Transformer for Embeddings
+                status.text("Loading Semantic Search model...")
+                models['embedding_model'] = SentenceTransformer('all-MiniLM-L6-v2')
+                progress.progress(50)
                 
-                # 3. Text Generation LLM (GPT-2 based)
-                self.text_generator = pipeline(
-                    "text-generation",
-                    model="distilgpt2",
-                    max_length=200,
-                    num_return_sequences=1,
-                    temperature=0.7,
-                    pad_token_id=50256
-                )
+                # 3. Text Generation (optional)
+                status.text("Loading Text Generation model...")
+                try:
+                    models['text_generator'] = pipeline(
+                        "text-generation",
+                        model="distilgpt2",
+                        max_length=150,
+                        temperature=0.7,
+                        pad_token_id=50256
+                    )
+                except Exception as e:
+                    st.warning(f"Text generation unavailable: {e}")
+                    models['text_generator'] = None
+                progress.progress(75)
                 
-                # 4. Classification LLM for document analysis
-                self.classifier = pipeline(
-                    "zero-shot-classification",
-                    model="facebook/bart-large-mnli"
-                )
+                # 4. Classification Model (optional)
+                status.text("Loading Classification model...")
+                try:
+                    models['classifier'] = pipeline(
+                        "zero-shot-classification",
+                        model="facebook/bart-large-mnli"
+                    )
+                except Exception as e:
+                    st.warning(f"Classification unavailable: {e}")
+                    models['classifier'] = None
                 
-            st.success("✅ All LLM models loaded successfully!")
-            self.display_model_info()
-            
+                progress.progress(100)
+                progress.empty()
+                status.empty()
+                
+                st.success("✅ All models loaded successfully!")
+                return models
+                
         except Exception as e:
-            st.error(f"❌ Error loading LLM models: {e}")
-            st.info("💡 Models will be downloaded automatically on first run")
-            raise e
+            st.error(f"❌ Error loading models: {e}")
+            return None
     
-    def display_model_info(self):
-        """Display information about loaded models"""
-        with st.expander("🤖 Loaded LLM Models Information"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("""
-                **Question Answering LLM:**
-                - Model: DistilBERT (66M parameters)
-                - Architecture: Transformer encoder
-                - Capability: Extractive QA
-                
-                **Semantic Search LLM:**
-                - Model: MiniLM (22M parameters)
-                - Architecture: Sentence transformer
-                - Capability: Dense embeddings
-                """)
-            
-            with col2:
-                st.markdown("""
-                **Text Generation LLM:**
-                - Model: DistilGPT2 (82M parameters)
-                - Architecture: Transformer decoder
-                - Capability: Text generation
-                
-                **Classification LLM:**
-                - Model: BART-Large (400M parameters)
-                - Architecture: Encoder-decoder
-                - Capability: Zero-shot classification
-                """)
-    
-    def extract_text_from_pdf(self, file_path: str) -> str:
-        """Extract text from PDF file"""
+    def extract_text_from_pdf(self, uploaded_file) -> str:
+        """Extract text from uploaded PDF file"""
         try:
+            pdf_reader = PyPDF2.PdfReader(uploaded_file)
             text = ""
-            with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                for page_num, page in enumerate(pdf_reader.pages):
-                    try:
-                        page_text = page.extract_text()
-                        if page_text.strip():
-                            text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
-                    except:
-                        continue
+            for page_num, page in enumerate(pdf_reader.pages[:20]):  # Limit pages
+                try:
+                    page_text = page.extract_text()
+                    if page_text.strip():
+                        text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
+                except:
+                    continue
             return text
         except Exception as e:
-            st.error(f"Error reading PDF: {str(e)}")
+            st.error(f"Error reading PDF: {e}")
             return ""
     
-    def extract_text_from_docx(self, file_path: str) -> str:
-        """Extract text from DOCX file"""
+    def extract_text_from_docx(self, uploaded_file) -> str:
+        """Extract text from uploaded DOCX file"""
         try:
-            doc = docx.Document(file_path)
+            doc = docx.Document(uploaded_file)
             text = ""
             for paragraph in doc.paragraphs:
                 if paragraph.text.strip():
@@ -138,33 +143,34 @@ class DefenseTenderLLM:
                         text += row_text + "\n"
             return text
         except Exception as e:
-            st.error(f"Error reading DOCX: {str(e)}")
+            st.error(f"Error reading DOCX: {e}")
             return ""
     
-    def extract_text_from_txt(self, file_path: str) -> str:
-        """Extract text from TXT file"""
+    def extract_text_from_txt(self, uploaded_file) -> str:
+        """Extract text from uploaded TXT file"""
         try:
+            # Try different encodings
+            text_content = uploaded_file.read()
             encodings = ['utf-8', 'utf-16', 'latin-1', 'cp1252']
+            
             for encoding in encodings:
                 try:
-                    with open(file_path, 'r', encoding=encoding) as file:
-                        return file.read()
+                    if isinstance(text_content, bytes):
+                        return text_content.decode(encoding)
+                    else:
+                        return str(text_content)
                 except UnicodeDecodeError:
                     continue
             return ""
         except Exception as e:
-            st.error(f"Error reading TXT: {str(e)}")
+            st.error(f"Error reading TXT: {e}")
             return ""
     
-    def intelligent_chunking(self, text: str, chunk_size: int = 512, overlap: int = 50) -> List[str]:
-        """
-        Intelligent text chunking optimized for transformer models
-        Using 512 tokens which is optimal for BERT-based models
-        """
+    def intelligent_chunking(self, text: str, tokenizer, chunk_size: int = 400) -> List[str]:
+        """Chunk text intelligently for transformers"""
         if not text or not text.strip():
             return []
         
-        # Split by sentences first
         sentences = re.split(r'[.!?]+', text)
         chunks = []
         current_chunk = ""
@@ -174,31 +180,32 @@ class DefenseTenderLLM:
             if not sentence:
                 continue
             
-            # Check if adding sentence exceeds chunk size
             test_chunk = current_chunk + " " + sentence if current_chunk else sentence
             
-            # Use tokenizer to count actual tokens (more accurate for transformers)
-            tokens = self.qa_tokenizer.encode(test_chunk, add_special_tokens=True)
-            
-            if len(tokens) <= chunk_size:
-                current_chunk = test_chunk
-            else:
-                # Save current chunk and start new one
-                if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
-                current_chunk = sentence
+            try:
+                tokens = tokenizer.encode(test_chunk, add_special_tokens=True)
+                if len(tokens) <= chunk_size:
+                    current_chunk = test_chunk
+                else:
+                    if current_chunk.strip():
+                        chunks.append(current_chunk.strip())
+                    current_chunk = sentence
+            except:
+                # Fallback to character count
+                if len(test_chunk) <= chunk_size * 4:
+                    current_chunk = test_chunk
+                else:
+                    if current_chunk.strip():
+                        chunks.append(current_chunk.strip())
+                    current_chunk = sentence
         
-        # Add final chunk
         if current_chunk.strip():
             chunks.append(current_chunk.strip())
         
-        # Filter out very short chunks
-        chunks = [chunk for chunk in chunks if len(chunk.split()) > 10]
-        
-        return chunks
+        return [chunk for chunk in chunks if len(chunk.split()) > 10]
     
-    def process_documents(self, uploaded_files) -> bool:
-        """Process uploaded documents with LLM optimization"""
+    def process_documents(self, uploaded_files, models) -> bool:
+        """Process uploaded documents"""
         try:
             self.documents = []
             
@@ -210,60 +217,57 @@ class DefenseTenderLLM:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            with tempfile.TemporaryDirectory() as temp_dir:
-                for idx, uploaded_file in enumerate(uploaded_files):
-                    status_text.text(f"🤖 LLM Processing: {uploaded_file.name} ({idx+1}/{total_files})")
+            for idx, uploaded_file in enumerate(uploaded_files):
+                status_text.text(f"🤖 Processing: {uploaded_file.name} ({idx+1}/{total_files})")
+                
+                # Reset file pointer
+                uploaded_file.seek(0)
+                
+                try:
+                    # Extract text based on file type
+                    text = ""
+                    if uploaded_file.name.lower().endswith('.pdf'):
+                        text = self.extract_text_from_pdf(uploaded_file)
+                    elif uploaded_file.name.lower().endswith('.docx'):
+                        text = self.extract_text_from_docx(uploaded_file)
+                    elif uploaded_file.name.lower().endswith('.txt'):
+                        text = self.extract_text_from_txt(uploaded_file)
                     
-                    try:
-                        # Save uploaded file
-                        file_path = os.path.join(temp_dir, uploaded_file.name)
-                        with open(file_path, "wb") as f:
-                            f.write(uploaded_file.getbuffer())
+                    if text and text.strip():
+                        # Chunk the text
+                        chunks = self.intelligent_chunking(text, models['qa_tokenizer'])
                         
-                        # Extract text based on file type
-                        text = ""
-                        if uploaded_file.name.lower().endswith('.pdf'):
-                            text = self.extract_text_from_pdf(file_path)
-                        elif uploaded_file.name.lower().endswith('.docx'):
-                            text = self.extract_text_from_docx(file_path)
-                        elif uploaded_file.name.lower().endswith('.txt'):
-                            text = self.extract_text_from_txt(file_path)
-                        
-                        if text and text.strip():
-                            # Intelligent chunking optimized for transformers
-                            chunks = self.intelligent_chunking(text)
+                        if chunks:
+                            for chunk_idx, chunk in enumerate(chunks):
+                                self.documents.append({
+                                    'text': chunk,
+                                    'source': uploaded_file.name,
+                                    'chunk_id': len(self.documents),
+                                    'chunk_index': chunk_idx,
+                                    'total_chunks': len(chunks)
+                                })
                             
-                            if chunks:
-                                for chunk_idx, chunk in enumerate(chunks):
-                                    self.documents.append({
-                                        'text': chunk,
-                                        'source': uploaded_file.name,
-                                        'chunk_id': len(self.documents),
-                                        'chunk_index': chunk_idx,
-                                        'total_chunks': len(chunks)
-                                    })
-                                
-                                st.success(f"✅ {uploaded_file.name}: {len(chunks)} chunks processed with LLM")
-                            else:
-                                st.warning(f"⚠️ No meaningful content found in {uploaded_file.name}")
+                            st.success(f"✅ {uploaded_file.name}: {len(chunks)} chunks processed")
                         else:
-                            st.warning(f"⚠️ Could not extract text from {uploaded_file.name}")
-                    
-                    except Exception as e:
-                        st.error(f"❌ Error processing {uploaded_file.name}: {str(e)}")
-                        continue
-                    
-                    progress_bar.progress((idx + 1) / total_files)
+                            st.warning(f"⚠️ No meaningful content in {uploaded_file.name}")
+                    else:
+                        st.warning(f"⚠️ Could not extract text from {uploaded_file.name}")
+                
+                except Exception as e:
+                    st.error(f"❌ Error processing {uploaded_file.name}: {e}")
+                    continue
+                
+                progress_bar.progress((idx + 1) / total_files)
             
             if not self.documents:
-                st.error("❌ No text content found in any uploaded files!")
+                st.error("❌ No text content found in any files!")
                 return False
             
-            # Create embeddings after processing all documents
-            self.create_semantic_embeddings()
+            # Create embeddings
+            self.create_semantic_embeddings(models['embedding_model'])
             
             progress_bar.progress(1.0)
-            status_text.text(f"✅ LLM processed {len(self.documents)} chunks from {total_files} files")
+            status_text.text(f"✅ Processed {len(self.documents)} chunks from {total_files} files")
             time.sleep(1)
             progress_bar.empty()
             status_text.empty()
@@ -271,78 +275,95 @@ class DefenseTenderLLM:
             return True
             
         except Exception as e:
-            st.error(f"❌ Error in LLM document processing: {str(e)}")
+            st.error(f"❌ Error in document processing: {e}")
             return False
     
-    def create_semantic_embeddings(self):
-        """Create semantic embeddings using sentence transformer LLM"""
+    def create_semantic_embeddings(self, embedding_model):
+        """Create semantic embeddings using sentence transformer"""
         if not self.documents:
             return
         
         texts = [doc['text'] for doc in self.documents]
         
-        with st.spinner("🧠 Creating semantic embeddings with LLM..."):
-            # Generate embeddings using sentence transformer
-            self.embeddings = self.embedding_model.encode(
+        with st.spinner("🧠 Creating semantic embeddings..."):
+            # Generate embeddings
+            self.embeddings = embedding_model.encode(
                 texts,
                 convert_to_tensor=False,
-                show_progress_bar=True,
-                batch_size=32  # Optimize batch size for performance
+                show_progress_bar=False,
+                batch_size=32
             )
             
-            # Create FAISS index for fast vector similarity search
+            # Create FAISS index
             dimension = self.embeddings.shape[1]
-            self.faiss_index = faiss.IndexFlatIP(dimension)  # Inner product for cosine similarity
+            self.faiss_index = faiss.IndexFlatIP(dimension)
             
-            # Normalize embeddings for cosine similarity
+            # Normalize and add embeddings
             faiss.normalize_L2(self.embeddings.astype('float32'))
             self.faiss_index.add(self.embeddings.astype('float32'))
         
-        st.success(f"✅ Created {dimension}D semantic embeddings for {len(self.documents)} chunks")
+        st.success(f"✅ Created {dimension}D embeddings for {len(self.documents)} chunks")
     
-    def semantic_search(self, query: str, top_k: int = 5) -> List[Dict]:
-        """Perform semantic search using transformer embeddings"""
+    def semantic_search(self, query: str, embedding_model, top_k: int = 5) -> List[Dict]:
+        """Perform semantic search"""
         if self.faiss_index is None or not query.strip():
             return []
         
-        # Encode query using the same LLM
-        query_embedding = self.embedding_model.encode([query.strip()])
+        # Encode query
+        query_embedding = embedding_model.encode([query.strip()])
         faiss.normalize_L2(query_embedding.astype('float32'))
         
-        # Search for similar chunks
+        # Search
         scores, indices = self.faiss_index.search(query_embedding.astype('float32'), top_k)
         
         results = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx < len(self.documents) and score > 0.1:  # Threshold for relevance
+            if idx < len(self.documents) and score > 0.1:
                 results.append({
                     'text': self.documents[idx]['text'],
                     'source': self.documents[idx]['source'],
                     'score': float(score),
-                    'chunk_id': self.documents[idx]['chunk_id'],
-                    'method': 'Semantic Search (LLM)'
+                    'chunk_id': self.documents[idx]['chunk_id']
                 })
         
         return results
     
-    def llm_question_answering(self, question: str, context_chunks: List[Dict]) -> Dict[str, Any]:
-        """Use transformer LLM for question answering"""
-        if not context_chunks:
+    def answer_question(self, question: str, models) -> Dict[str, Any]:
+        """Main question answering pipeline"""
+        if not self.documents:
             return {
-                'answer': "No relevant information found in the documents for this question.",
+                'answer': "No documents processed. Please upload documents first.",
                 'confidence': 0.0,
-                'method': 'LLM-QA (No Context)',
-                'model': 'DistilBERT'
+                'sources': []
+            }
+        
+        if not question or not question.strip():
+            return {
+                'answer': "Please enter a valid question.",
+                'confidence': 0.0,
+                'sources': []
             }
         
         try:
-            # Combine top chunks as context (optimized for BERT input length)
+            start_time = time.time()
+            
+            # Semantic search
+            relevant_chunks = self.semantic_search(question.strip(), models['embedding_model'], top_k=5)
+            
+            if not relevant_chunks:
+                return {
+                    'answer': "No relevant information found. Try rephrasing your question.",
+                    'confidence': 0.0,
+                    'sources': []
+                }
+            
+            # Prepare context for QA
             context_texts = []
             total_length = 0
-            max_context_length = 400  # Leave room for question and special tokens
+            max_context_length = 400
             
-            for chunk in context_chunks:
-                chunk_tokens = len(self.qa_tokenizer.encode(chunk['text']))
+            for chunk in relevant_chunks:
+                chunk_tokens = len(models['qa_tokenizer'].encode(chunk['text']))
                 if total_length + chunk_tokens <= max_context_length:
                     context_texts.append(chunk['text'])
                     total_length += chunk_tokens
@@ -351,189 +372,56 @@ class DefenseTenderLLM:
             
             context = " ".join(context_texts)
             
-            # Use BERT-based QA model
-            result = self.qa_pipeline(
+            # Get answer using QA model
+            result = models['qa_pipeline'](
                 question=question,
                 context=context
             )
             
-            return {
-                'answer': result['answer'],
-                'confidence': result['score'],
-                'method': 'BERT-QA (Transformer)',
-                'model': 'DistilBERT',
-                'context_used': len(context_texts)
-            }
-            
-        except Exception as e:
-            st.error(f"LLM QA Error: {e}")
-            return {
-                'answer': f"Error in LLM processing: {str(e)}",
-                'confidence': 0.0,
-                'method': 'Error',
-                'model': 'DistilBERT'
-            }
-    
-    def generate_summary(self, chunks: List[Dict], max_length: int = 150) -> str:
-        """Generate document summary using LLM"""
-        if not chunks:
-            return "No content available to summarize."
-        
-        try:
-            # Prepare content for summarization
-            content = " ".join([chunk['text'][:200] for chunk in chunks[:3]])
-            prompt = f"Summarize this defense tender document: {content[:500]}"
-            
-            # Generate summary using GPT-2 based model
-            result = self.text_generator(
-                prompt,
-                max_length=len(prompt.split()) + 50,
-                temperature=0.7,
-                do_sample=True,
-                pad_token_id=50256
-            )
-            
-            generated_text = result[0]['generated_text']
-            summary = generated_text.replace(prompt, "").strip()
-            
-            return summary if summary else "Unable to generate summary with current LLM."
-            
-        except Exception as e:
-            return f"Summary generation error: {str(e)}"
-    
-    def classify_document_type(self, text: str) -> Dict[str, Any]:
-        """Classify document type using zero-shot classification LLM"""
-        try:
-            candidate_labels = [
-                "Request for Proposal (RFP)",
-                "Tender Notice",
-                "Technical Specifications",
-                "Financial Proposal",
-                "Eligibility Criteria",
-                "Terms and Conditions",
-                "Contract Document"
-            ]
-            
-            # Use first 500 characters for classification
-            sample_text = text[:500]
-            
-            result = self.classifier(sample_text, candidate_labels)
-            
-            return {
-                'document_type': result['labels'][0],
-                'confidence': result['scores'][0],
-                'all_scores': dict(zip(result['labels'], result['scores']))
-            }
-            
-        except Exception as e:
-            return {
-                'document_type': 'Unknown',
-                'confidence': 0.0,
-                'error': str(e)
-            }
-    
-    def answer_question(self, question: str) -> Dict[str, Any]:
-        """Main LLM-powered question answering pipeline"""
-        if not self.documents:
-            return {
-                'answer': "No documents have been processed yet. Please upload documents first.",
-                'confidence': 0.0,
-                'sources': [],
-                'method': 'No Documents'
-            }
-        
-        if not question or not question.strip():
-            return {
-                'answer': "Please enter a valid question.",
-                'confidence': 0.0,
-                'sources': [],
-                'method': 'Invalid Question'
-            }
-        
-        try:
-            start_time = time.time()
-            
-            # Step 1: Semantic search using sentence transformer
-            relevant_chunks = self.semantic_search(question.strip(), top_k=5)
-            
-            if not relevant_chunks:
-                return {
-                    'answer': "No relevant information found. Try rephrasing your question or check if the information exists in the uploaded documents.",
-                    'confidence': 0.0,
-                    'sources': [],
-                    'method': 'No Relevant Chunks'
-                }
-            
-            # Step 2: Use transformer LLM for question answering
-            llm_result = self.llm_question_answering(question.strip(), relevant_chunks)
-            
-            # Step 3: Generate summary if needed
-            if llm_result['confidence'] < 0.3:
-                summary = self.generate_summary(relevant_chunks[:2])
-                llm_result['answer'] += f"\n\nAdditional context: {summary}"
-            
             processing_time = time.time() - start_time
             
             return {
-                'answer': llm_result['answer'],
-                'confidence': llm_result['confidence'],
+                'answer': result['answer'],
+                'confidence': result['score'],
                 'sources': list(set([chunk['source'] for chunk in relevant_chunks[:3]])),
                 'relevant_chunks': relevant_chunks[:3],
-                'method': llm_result['method'],
-                'model': llm_result['model'],
-                'processing_time': processing_time,
-                'context_chunks_used': llm_result.get('context_used', 0)
+                'processing_time': processing_time
             }
             
         except Exception as e:
             return {
-                'answer': f"Error in LLM processing: {str(e)}",
+                'answer': f"Error processing question: {str(e)}",
                 'confidence': 0.0,
-                'sources': [],
-                'method': 'Error'
+                'sources': []
             }
-    
-    def get_llm_stats(self) -> Dict[str, Any]:
-        """Get LLM system statistics"""
-        return {
-            'total_documents': len(self.documents),
-            'embedding_dimension': self.embeddings.shape[1] if self.embeddings is not None else 0,
-            'qa_model': self.qa_model_name,
-            'embedding_model': 'all-MiniLM-L6-v2',
-            'total_parameters': '570M+',  # Approximate total across all models
-            'semantic_search_enabled': self.faiss_index is not None,
-            'models_loaded': 4
-        }
 
 def main():
-    """Main Streamlit application"""
-    st.set_page_config(
-        page_title="Defense Tender LLM Analyzer",
-        page_icon="🤖",
-        layout="wide"
-    )
-    
+    """Main Streamlit application for Hugging Face Spaces"""
     st.title("🤖 Defense Tender LLM Analyzer")
-    st.markdown("**AI-Powered Document Analysis using Large Language Models (570M+ Parameters)**")
+    st.markdown("**AI-Powered Document Analysis - Hugging Face Spaces Edition**")
     
-    # LLM Information Banner
+    # Model info
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("🧠 LLM Models", "4 Transformers")
+        st.metric("🧠 AI Models", "4 Transformers")
     with col2:
         st.metric("🔢 Parameters", "570M+")
     with col3:
         st.metric("🏗️ Architecture", "BERT + GPT")
     with col4:
-        st.metric("🔍 Search Type", "Semantic")
+        st.metric("🔍 Search", "Semantic")
     
-    # Initialize LLM system
+    # Initialize system
     if 'llm_analyzer' not in st.session_state:
-        try:
-            st.session_state.llm_analyzer = DefenseTenderLLM()
-            st.session_state.documents_processed = False
-        except Exception as e:
-            st.error(f"Failed to initialize LLM system: {e}")
+        st.session_state.llm_analyzer = DefenseTenderLLM()
+        st.session_state.documents_processed = False
+        st.session_state.models = None
+    
+    # Load models
+    if st.session_state.models is None:
+        st.session_state.models = st.session_state.llm_analyzer.load_models()
+        if st.session_state.models is None:
+            st.error("❌ Failed to load models. Please refresh the page.")
             st.stop()
     
     # Sidebar for document upload
@@ -550,134 +438,107 @@ def main():
         if uploaded_files:
             st.info(f"📄 {len(uploaded_files)} file(s) selected")
             
-            if st.button("🤖 Process with LLM", type="primary"):
+            if st.button("🤖 Process with AI", type="primary"):
                 start_time = time.time()
-                success = st.session_state.llm_analyzer.process_documents(uploaded_files)
+                success = st.session_state.llm_analyzer.process_documents(
+                    uploaded_files, st.session_state.models
+                )
                 processing_time = time.time() - start_time
                 
                 st.session_state.documents_processed = success
                 
                 if success:
-                    st.success(f"✅ LLM processing completed in {processing_time:.1f}s!")
+                    st.success(f"✅ Processing completed in {processing_time:.1f}s!")
                     st.balloons()
                 else:
-                    st.error("❌ LLM processing failed.")
+                    st.error("❌ Processing failed.")
         
-        # LLM Statistics
+        # Statistics
         if st.session_state.documents_processed:
-            st.subheader("🤖 LLM Statistics")
-            stats = st.session_state.llm_analyzer.get_llm_stats()
-            
-            st.metric("Document Chunks", stats['total_documents'])
-            st.metric("Embedding Dimensions", stats['embedding_dimension'])
-            st.metric("Models Loaded", stats['models_loaded'])
-            
-            with st.expander("🔍 LLM Model Details"):
-                st.markdown(f"""
-                **Question Answering:**
-                - Model: {stats['qa_model']}
-                - Type: BERT Transformer
-                - Parameters: 66M
-                
-                **Semantic Search:**
-                - Model: {stats['embedding_model']}
-                - Type: Sentence Transformer
-                - Parameters: 22M
-                
-                **Text Generation:**
-                - Model: DistilGPT2
-                - Type: GPT Transformer
-                - Parameters: 82M
-                
-                **Classification:**
-                - Model: BART-Large
-                - Type: Encoder-Decoder
-                - Parameters: 400M
-                """)
+            st.subheader("📊 Statistics")
+            st.metric("Document Chunks", len(st.session_state.llm_analyzer.documents))
+            if st.session_state.llm_analyzer.embeddings is not None:
+                st.metric("Embedding Dims", st.session_state.llm_analyzer.embeddings.shape[1])
     
-    # Main content area
+    # Main content
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.header("🤖 LLM-Powered Question Answering")
+        st.header("🤖 AI Question Answering")
         
         if not st.session_state.documents_processed:
-            st.info("👈 Please upload and process documents first using the LLM system.")
+            st.info("👈 Please upload and process documents first.")
             
-            with st.expander("💡 What makes this an LLM system?"):
+            with st.expander("💡 About this AI System"):
                 st.markdown("""
-                **This system uses multiple Large Language Models:**
+                **Large Language Models in use:**
                 
-                🧠 **Transformer Architecture:**
-                - Multi-head attention mechanisms
-                - Positional encoding
-                - Layer normalization
-                - Feed-forward networks
+                🧠 **Question Answering**: DistilBERT (66M parameters)
+                - Transformer encoder architecture
+                - Fine-tuned for extractive QA
                 
-                🤖 **Neural Language Models:**
-                - **BERT**: 66M parameter encoder for understanding
-                - **Sentence-BERT**: 22M parameter model for semantic similarity
-                - **GPT-2**: 82M parameter decoder for text generation
-                - **BART**: 400M parameter encoder-decoder for classification
+                🔍 **Semantic Search**: MiniLM (22M parameters)  
+                - Sentence transformer model
+                - 384-dimensional embeddings
                 
-                🔍 **Advanced NLP Capabilities:**
-                - Semantic understanding (not just keyword matching)
-                - Context-aware question answering
-                - Dense vector representations
+                📝 **Text Generation**: DistilGPT2 (82M parameters)
+                - Transformer decoder architecture
+                - Autoregressive text generation
+                
+                🏷️ **Classification**: BART-Large (400M parameters)
+                - Encoder-decoder transformer
                 - Zero-shot classification
                 
-                📊 **Total System:**
-                - **570M+ parameters** across all models
-                - **Transformer-based** architecture throughout
-                - **Pre-trained** on massive text corpora
-                - **Fine-tuned** for question answering tasks
+                **Total: 570M+ parameters across all models**
                 """)
         else:
-            # Pre-defined questions optimized for LLM
-            st.subheader("🎯 Quick LLM Questions")
+            # Quick questions
+            st.subheader("🎯 Quick Questions")
             example_questions = [
-                "What are the main eligibility requirements for bidders?",
-                "When is the submission deadline for this tender?",
-                "What technical specifications are required?",
-                "What is the estimated budget or contract value?",
-                "How will the proposals be evaluated?",
-                "What documents must be submitted with the bid?",
-                "What are the key delivery timelines?",
-                "Are there any security clearance requirements?"
+                "What are the eligibility requirements?",
+                "When is the submission deadline?",
+                "What are the technical specifications?",
+                "What is the contract value?",
+                "How will proposals be evaluated?",
+                "What documents are required?",
+                "What are the delivery timelines?",
+                "Are there security clearance requirements?"
             ]
             
             cols = st.columns(2)
             for i, question in enumerate(example_questions):
                 with cols[i % 2]:
-                    if st.button(question, key=f"llm_q_{i}"):
+                    if st.button(question, key=f"q_{i}"):
                         st.session_state.selected_question = question
                         st.rerun()
             
-            # Custom question input
-            st.subheader("✍️ Ask Your LLM Question")
+            # Custom question
+            st.subheader("✍️ Ask Your Question")
             default_question = st.session_state.get('selected_question', '')
             custom_question = st.text_area(
                 "Your Question:",
                 value=default_question,
                 height=100,
-                placeholder="Ask anything about the tender documents using natural language...",
-                key="llm_question_input"
+                placeholder="Ask anything about the documents...",
+                key="question_input"
             )
             
-            if st.button("🤖 Get LLM Answer", type="primary") and custom_question.strip():
+            if st.button("🤖 Get AI Answer", type="primary") and custom_question.strip():
                 start_time = time.time()
                 
-                with st.spinner("🤖 LLM is processing your question..."):
-                    result = st.session_state.llm_analyzer.answer_question(custom_question.strip())
+                with st.spinner("🤖 AI is analyzing your question..."):
+                    result = st.session_state.llm_analyzer.answer_question(
+                        custom_question.strip(), st.session_state.models
+                    )
                 
                 answer_time = time.time() - start_time
                 
-                # Display LLM answer
-                st.subheader("🤖 LLM Answer")
+                # Display answer
+                st.subheader("🤖 AI Answer")
                 st.write(result['answer'])
                 
-                # LLM metrics
-                col_conf, col_time, col_method, col_model = st.columns(4)
+                # Metrics
+                col_conf, col_time, col_sources = st.columns(3)
                 
                 with col_conf:
                     confidence_color = "green" if result['confidence'] > 0.7 else "orange" if result['confidence'] > 0.4 else "red"
@@ -686,11 +547,8 @@ def main():
                 with col_time:
                     st.markdown(f"**Response Time:** {answer_time:.2f}s")
                 
-                with col_method:
-                    st.markdown(f"**Method:** {result.get('method', 'LLM')}")
-                
-                with col_model:
-                    st.markdown(f"**Model:** {result.get('model', 'Transformer')}")
+                with col_sources:
+                    st.markdown(f"**Sources:** {len(result.get('sources', []))}")
                 
                 # Sources
                 if result.get('sources'):
@@ -698,12 +556,12 @@ def main():
                     for source in result['sources']:
                         st.info(f"📄 {source}")
                 
-                # Semantic search results
+                # Relevant chunks
                 if 'relevant_chunks' in result and result['relevant_chunks']:
-                    with st.expander(f"🔍 Semantic Search Results (LLM Embeddings)"):
+                    with st.expander("🔍 Relevant Text Sections"):
                         for i, chunk in enumerate(result['relevant_chunks'], 1):
-                            st.markdown(f"**Chunk {i}** (Similarity Score: {chunk['score']:.3f})")
-                            st.markdown(f"*Source: {chunk['source']} | Method: {chunk['method']}*")
+                            st.markdown(f"**Section {i}** (Similarity: {chunk['score']:.3f})")
+                            st.markdown(f"*Source: {chunk['source']}*")
                             st.markdown(chunk['text'][:400] + "..." if len(chunk['text']) > 400 else chunk['text'])
                             st.markdown("---")
                 
@@ -712,89 +570,36 @@ def main():
                     del st.session_state.selected_question
     
     with col2:
-        st.header("🤖 LLM System Info")
+        st.header("🚀 System Status")
         
-        # LLM Status
-        with st.container():
-            st.subheader("🚀 LLM Status")
-            
-            if st.session_state.get('llm_analyzer'):
-                st.success("🟢 LLM Models Loaded")
-                if st.session_state.documents_processed:
-                    stats = st.session_state.llm_analyzer.get_llm_stats()
-                    st.success(f"🟢 {stats['total_documents']} chunks ready")
-                    if stats['semantic_search_enabled']:
-                        st.success("🟢 Semantic search active")
-                else:
-                    st.warning("🟡 No documents processed")
+        if st.session_state.models:
+            st.success("🟢 AI Models Loaded")
+            if st.session_state.documents_processed:
+                st.success(f"🟢 {len(st.session_state.llm_analyzer.documents)} chunks ready")
+                if st.session_state.llm_analyzer.faiss_index:
+                    st.success("🟢 Semantic search active")
             else:
-                st.error("🔴 LLM not initialized")
+                st.warning("🟡 No documents processed")
+        else:
+            st.error("🔴 AI models not loaded")
         
-        # Model Architecture
-        st.subheader("🏗️ LLM Architecture")
+        st.subheader("💡 How to Use")
+        st.markdown("""
+        1. **Upload** your tender documents (PDF, DOCX, TXT)
+        2. **Process** them with AI models
+        3. **Ask** questions in natural language
+        4. **Get** intelligent answers with sources
         
-        if st.session_state.get('llm_analyzer'):
-            with st.expander("🤖 Transformer Models"):
-                st.markdown("""
-                **Active LLM Components:**
-                
-                🧠 **Question Answering:**
-                - DistilBERT (66M params)
-                - 6-layer transformer encoder
-                - Multi-head attention (12 heads)
-                
-                🔍 **Semantic Search:**
-                - MiniLM (22M params)
-                - Sentence embeddings (384D)
-                - Cosine similarity matching
-                
-                📝 **Text Generation:**
-                - DistilGPT2 (82M params)
-                - 6-layer transformer decoder
-                - Autoregressive generation
-                
-                🏷️ **Classification:**
-                - BART-Large (400M params)
-                - Encoder-decoder architecture
-                - Zero-shot classification
-                """)
+        The AI uses semantic understanding, not just keyword matching!
+        """)
         
-        # Performance monitoring
         if st.session_state.documents_processed:
-            st.subheader("📊 Performance")
-            
-            stats = st.session_state.llm_analyzer.get_llm_stats()
-            st.metric("Embedding Dimensions", stats['embedding_dimension'])
-            st.metric("Total Parameters", stats['total_parameters'])
-            
-            if st.button("🧹 Clear LLM Cache"):
-                # Clear any caches
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            st.subheader("🧹 Actions")
+            if st.button("Clear Cache"):
+                # Clear cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 st.success("Cache cleared!")
-        
-        # Help section
-        st.subheader("❓ LLM Help")
-        
-        with st.expander("💡 How the LLM works"):
-            st.markdown("""
-            **LLM Processing Pipeline:**
-            
-            1. **Document Processing**: Text extraction and chunking
-            2. **Semantic Encoding**: Convert text to 384D vectors using sentence transformers
-            3. **Question Analysis**: Process query using BERT tokenizer
-            4. **Similarity Search**: Find relevant chunks using FAISS vector search
-            5. **Answer Generation**: Use DistilBERT QA model for final answer
-            6. **Confidence Scoring**: Neural network confidence estimation
-            
-            **Why it's a proper LLM:**
-            
-            ✅ **Neural Networks**: All models use deep neural networks
-            ✅ **Transformers**: BERT, GPT, BART architectures
-            ✅ **Attention Mechanisms**: Multi-head self-attention
-            ✅ **Pre-training**: Models trained on billions of tokens
-            ✅ **Semantic Understanding**: Beyond keyword matching
-            ✅ **Context Awareness**: Understands document context
-            """)
 
 if __name__ == "__main__":
     main()
