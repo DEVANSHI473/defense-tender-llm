@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Run Streamlit App",
+            "name": "Run LLM Streamlit App",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/venv/bin/streamlit",
@@ -10,33 +10,40 @@
                 "run",
                 "defense_tender_llm.py",
                 "--server.port=8501",
-                "--server.address=localhost"
+                "--server.address=localhost",
+                "--server.maxUploadSize=200"
             ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "TOKENIZERS_PARALLELISM": "false",
+                "HF_HUB_DISABLE_PROGRESS_BARS": "1"
+            }
+        },
+        {
+            "name": "Debug LLM System",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "DEBUG": "true",
+                "LOG_LEVEL": "DEBUG"
+            }
+        },
+        {
+            "name": "Test LLM Models",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_llm.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             }
-        },
-        {
-            "name": "Debug Python File",
-            "type": "python",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "name": "Run Tests",
-            "type": "python",
-            "request": "launch",
-            "module": "pytest",
-            "args": [
-                "-v",
-                "tests/"
-            ],
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}"
         }
     ]
 }
