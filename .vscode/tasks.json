@@ -2,10 +2,10 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Install Dependencies",
+            "label": "Setup Virtual Environment",
             "type": "shell",
-            "command": "${workspaceFolder}/venv/bin/pip",
-            "args": ["install", "-r", "requirements.txt"],
+            "command": "python",
+            "args": ["-m", "venv", "venv"],
             "group": "build",
             "presentation": {
                 "echo": true,
@@ -15,11 +15,39 @@
             }
         },
         {
-            "label": "Run Streamlit",
+            "label": "Install LLM Dependencies",
+            "type": "shell",
+            "command": "${workspaceFolder}/venv/bin/pip",
+            "args": ["install", "-r", "requirements.txt"],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "dependsOn": "Setup Virtual Environment"
+        },
+        {
+            "label": "Run LLM Streamlit App",
             "type": "shell",
             "command": "${workspaceFolder}/venv/bin/streamlit",
-            "args": ["run", "defense_tender_llm.py"],
+            "args": ["run", "defense_tender_llm.py", "--server.port=8501"],
             "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "dependsOn": "Install LLM Dependencies"
+        },
+        {
+            "label": "Test LLM Models",
+            "type": "shell",
+            "command": "${workspaceFolder}/venv/bin/python",
+            "args": ["-c", "from transformers import pipeline; print('Testing Flan-T5...'); pipe = pipeline('text2text-generation', model='google/flan-t5-small'); print('✅ LLM models work!')"],
+            "group": "test",
             "presentation": {
                 "echo": true,
                 "reveal": "always",
@@ -39,6 +67,13 @@
             "type": "shell",
             "command": "${workspaceFolder}/venv/bin/flake8",
             "args": ["."],
+            "group": "test"
+        },
+        {
+            "label": "Check GPU Support",
+            "type": "shell",
+            "command": "${workspaceFolder}/venv/bin/python",
+            "args": ["-c", "import torch; print(f'CUDA Available: {torch.cuda.is_available()}'); print(f'GPU Count: {torch.cuda.device_count()}'); print(f'Current Device: {torch.cuda.current_device()}' if torch.cuda.is_available() else 'CPU Only')"],
             "group": "test"
         }
     ]
